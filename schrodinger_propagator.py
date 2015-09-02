@@ -1,44 +1,8 @@
 __author__ = 'kdfstudio'
 
 import numpy as np
-from collections import defaultdict
 from itertools import chain, izip
-
-def MapReduce(mapper, reducer, input_data):
-    """
-    Simple implementation of map reducer
-    :param mapper: a mapper generator must yield (key, value)
-    :param reducer: a reducer generator
-    :return: processed data
-
-    # Character count example using MaoReduce
-    def mapper(x):
-        yield (x, 1)
-
-    def reducer(k, v):
-        yield (k, sum(v))
-
-    print MapReduce(mapper, reducer, "TestInputString")
-    """
-    # Map data
-    if mapper is None:
-        mapped_data = input_data
-    else:
-        mapped_data = chain(*(mapper(x) for x in input_data))
-    #
-    if reducer is None:
-        return list(mapped_data)
-    #
-    # Shuffle data
-    shuffled_data = defaultdict(list)
-    for key, value in mapped_data:
-        shuffled_data[key].append(value)
-    #
-    # Reduce data
-    reduced_data = (reducer(k, v) for k, v in shuffled_data.items())
-    reduced_data = list(chain(*reduced_data))
-    #
-    return reduced_data
+import matplotlib.pyplot as plt
 
 #################################################################
 
@@ -49,7 +13,7 @@ class AbsSchrodingerPropagator:
     self.dt -- time increment
     self.m -- mass
     self.expUexpansion -- interpolation of exp(-1j*dt*U(x)) with ampl*exp(alpha*x^2 + beta*x)
-    self.weight_cutoff --
+    self.norm_cutoff --
     """
     #############################################################
     #
@@ -61,56 +25,87 @@ class AbsSchrodingerPropagator:
         """
         Calculate action of exp(-1j*dt*p^2/(2m)) on
         a gaussian given in the coordinate representation
-        :param gaussian: (ampl, alpha, beta) tuple denoting ampl*exp(alpha*x^2 + beta*x)
+        :param gaussian: (ampl, alpha, mu) tuple denoting ampl*exp(alpha*(x-mu)**2)
         :return: gaussian-like tuple
         """
         # unpack the gaussian in coordinate representation
-        ampl, alpha, beta = gaussian
+        ampl, alpha, mu = gaussian
         #
         c = 1 - 2j*self.dt*alpha
         #
-        ampl *= np.exp(1j*self.dt*beta**2/(4*self.m*c)) / np.sqrt(c)
-        alpha /= c
-        beta /= c
+        ampl = ampl / np.sqrt(c)
+        alpha = alpha / c
         #
-        yield (ampl, alpha, beta)
+        return ampl, alpha, mu
 
     def expU_Mapper(self, gaussian):
         """
         Calculate action of exp(-1j*dt*U(x)) on a gaussian
         given in the coordinate representation
-        :param gaussian: (ampl, alpha, beta) tuple denoting ampl*exp(alpha*x^2 + beta*x)
+        :param gaussian: (ampl, alpha, mu) tuple denoting ampl*exp(alpha*(x-mu)**2)
         :return: gaussian-like tuples
         """
-        ampl, alpha, beta = gaussian
-        #
-        for ampl_, alpha_, beta_ in self.expUexpansion:
-            yield (ampl + ampl_, alpha * alpha_, beta * beta_)
+        return self.multiply(gaussian, self.expUexpansion)
 
-    def getnorm_Mapper(self, gaussian):
+    def multiply(self, gaussian1, gaussian2):
+        #
+        ampl_1, alpha_1, mu_1 = gaussian1
+        #
+        ampl_1  = ampl_1[:, np.newaxis]
+        alpha_1 = alpha_1[:, np.newaxis]
+        mu_1    = mu_1[:, np.newaxis]
+        #
+        ampl_2, alpha_2, mu_2 = gaussian2
+        #
+        ampl_2  = ampl_2[np.newaxis,:]
+        alpha_2 = alpha_2[np.newaxis,:]
+        mu_2    = mu_2[np.newaxis,:]
+        #
+        alpha = alpha_1 + alpha_2
+        mu = (alpha_1*mu_1 + alpha_2*mu_2) / alpha
+        ampl = ampl_1*ampl_2 * np.exp(alpha_1 * mu_1**2 + alpha_2 * mu_2**2 - alpha * mu**2)
+        #
+        return np.ravel(ampl), np.ravel(alpha), np.ravel(mu)
+
+    def norms_Mapper(self, gaussian):
         """
         Calculate normalization integral
-            N = int(abs(ampl*exp(alpha*x^2 + beta*x))**2 , x=-infinity..+infinity)
-        :param gaussian: (ampl, alpha, beta) tuple denoting ampl*exp(alpha*x^2 + beta*x)
+            N = int(abs(ampl*exp(alpha*(x-mu)**2))**2 , x=-infinity..+infinity)
+        :param gaussian: (ampl, alpha, mu) tuple denoting ampl*exp(alpha*(x-mu)**2)
         :return: N
         """
-        ampl, alpha, beta = gaussian
+        ampl, alpha, mu = gaussian
         #
-        if np.real(alpha) > 0:
-            print "Warning: Divergent integral of ", gaussian
-            N = np.inf
-        else:
-            ra = np.real(alpha)
-            rb = np.real(beta)
-            N = np.abs(ampl)**2 * np.sqrt(-0.5*np.pi/ra) * np.exp(-0.5*rb**2/ra)
+        a = -2.*alpha.real
+        b = -4*np.real(mu*alpha)
         #
-        yield N
+        norms = np.abs(ampl)**2 * np.sqrt(np.pi/a) * np.exp(
+                0.25*b**2/a + 2*np.real(alpha*mu**2)
+        )
+        #
+        return norms
 
     #############################################################
     #
     #   Propagator
     #
     #############################################################
+
+    @classmethod
+    def getwavefunc(cls, gaussian, x):
+        #
+        ampl, alpha, mu = gaussian
+        #
+        ampl = ampl[np.newaxis,:]
+        alpha = alpha[np.newaxis,:]
+        mu = mu[np.newaxis,:]
+        #
+        x = x[:,np.newaxis]
+        #
+        return np.sum(
+            ampl*np.exp(alpha*(x - mu)**2),
+            axis=1
+        )
 
     def propagate(self, wavefunc):
         """
@@ -120,19 +115,40 @@ class AbsSchrodingerPropagator:
         """
         #
         # propagate by kinetic part
-        wavefunc = MapReduce(self.expKE_Mapper, None, wavefunc)
+        wavefunc = self.expKE_Mapper(wavefunc)
         #
         # propagate by potential part
-        wavefunc = MapReduce(self.expU_Mapper, None, wavefunc)
+        wavefunc = self.expU_Mapper(wavefunc)
         #
-        # get norms of each gaussian
-        norms = MapReduce(self.getnorm_Mapper, None, wavefunc)
+        # propagate by kinetic part
+        wavefunc = self.expKE_Mapper(wavefunc)
         #
-        norms = np.array(norms)
-        norms /= norms.sum()
+        #norms = self.norms_Mapper(wavefunc)
+        #norms /= norms.sum()
         #
-        wavefunc = [g for g, n in izip(wavefunc, norms) if n > self.weight_cutoff]
+        # find out which gausian to delete
+        # indx = np.nonzero(norms < self.norm_cutoff)[0]
         #
+        # wavefunc = [np.delete(param, indx) for param in wavefunc]
+        #
+        # print wavefunc[0].size
+        #
+        #
+        # resumpling
+        x = np.linspace(-5, +5, 100)
+
+        sigma = 0.5 * (x[1]-x[0])
+        alpha = -0.5/sigma**2
+
+        psi = self.getwavefunc(wavefunc, x)
+        psi /= np.linalg.norm(psi)
+
+        ampls = np.linalg.lstsq(
+            [np.exp(alpha*(x-x0)**2) for x0 in x],
+            psi
+        )[0]
+
+        wavefunc = (ampls, alpha*np.ones_like(x), x)
         return wavefunc
 
 #################################################################
@@ -142,13 +158,13 @@ class AbsSchrodingerPropagator:
 #################################################################
 
 # time increment
-dt = 0.01
+dt = 0.025
 
 # coordinate range
 x = np.linspace(-5, +5, 100)
 
 # potential
-U = 0.5 * x**2
+U = 0.5 * x**4
 expU = np.exp(-1j*dt*U)
 
 # approximate expU by gaussians
@@ -161,27 +177,42 @@ coeffs = np.linalg.lstsq(
 )[0]
 
 # Check the difference
-print "Accuracy of solving lin equations ", \
+print "Accuracy of the approximation expU ", \
 np.linalg.norm(
     expU -
     sum(c*np.exp(alpha*(x-x0)**2) for c, x0 in izip(coeffs, x))
 )
 
+expUexpansion = (coeffs, alpha*np.ones_like(x), x)
 
-expUexpansion = [
-    (c*np.exp(alpha*x0**2), alpha, -2*x0*alpha)
-    for c, x0 in izip(coeffs, x)
-]
-
-# remove terms with zero coefficients
-expUexpansion = [g for g in expUexpansion if g[0]]
-
-# Check the difference
-print "Accuracy of the approximation ", \
-np.linalg.norm(
-    expU -
-    sum(ampl*np.exp(alpha*x**2 + beta*x) for ampl, alpha, beta in expUexpansion)
-)
+def ProbDensity(wave, x):
+    psi = sum(
+        c * np.exp(a*(x-mu)**2) for c, a, mu in izip(*wave)
+    )
+    return np.abs(psi)
 
 
+class CHarmonicOscilator(AbsSchrodingerPropagator):
+    dt = 0.5*dt
+    m = 1
+    expUexpansion = expUexpansion
+    norm_cutoff = 1e-7
 
+HarmonicOsc = CHarmonicOscilator()
+
+wavefunc = ( np.array([1. + 0j]), np.array([-1. + 0j]), np.array([0 + 0.5j]) )
+
+#plt.plot(x, np.abs(HarmonicOsc.getwavefunc(wavefunc, x))**2, label='initial condition')
+
+density = []
+for i in range(200):
+    print i
+    wavefunc = HarmonicOsc.propagate(wavefunc)
+    density.append(
+        np.abs(HarmonicOsc.getwavefunc(wavefunc, x))**2
+    )
+
+#plt.plot(x, np.abs(HarmonicOsc.getwavefunc(wavefunc1, x))**2, label='final condition')
+#plt.legend()
+plt.imshow(density)
+plt.show()
