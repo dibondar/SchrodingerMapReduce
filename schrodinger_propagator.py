@@ -1,10 +1,7 @@
-__author__ = 'kdfstudio'
-
 import numpy as np
-from itertools import chain, izip
 import matplotlib.pyplot as plt
-
-#################################################################
+from scipy import fftpack
+from itertools import chain
 
 class AbsSchrodingerPropagator:
     """
@@ -12,207 +9,182 @@ class AbsSchrodingerPropagator:
 
     self.dt -- time increment
     self.m -- mass
-    self.expUexpansion -- interpolation of exp(-1j*dt*U(x)) with ampl*exp(alpha*x^2 + beta*x)
-    self.norm_cutoff --
+    self.x -- coordinate
+    self.expU
+    self.force
     """
-    #############################################################
-    #
-    #   MapReduce declarations
-    #
-    #############################################################
-
-    def expKE_Mapper(self, gaussian):
+    def averages(self, wavefunc, Nx=1, Np=1):
         """
-        Calculate action of exp(-1j*dt*p^2/(2m)) on
-        a gaussian given in the coordinate representation
-        :param gaussian: (ampl, alpha, mu) tuple denoting ampl*exp(alpha*(x-mu)**2)
-        :return: gaussian-like tuple
-        """
-        # unpack the gaussian in coordinate representation
-        ampl, alpha, mu = gaussian
         #
-        c = 1 - 2j*self.dt*alpha
+        averages = []
+        #
+        x_rho = np.abs(wavefunc)**2
+        x_pow = np.ones_like(self.x)
+        for n in xrange(Nx):
+            x_pow *= self.x
+            averages.append(np.sum(x_pow*x_rho))
+        #
+        p_wavefunc = fftpack.fft(wavefunc)
+        p_wavefunc /= np.linalg.norm(p_wavefunc)
+        p_rho = np.abs(p_wavefunc)**2
+        #
+        p_pow = np.ones_like(self.p)
+        for n in xrange(Np):
+            p_pow *= self.p
+            averages.append(np.sum(p_pow*p_rho))
+        #
+        return tuple(averages)
+        """
+        # dx = self.x[1] - self.x[0]
+        #
+        x_rho = np.abs(wavefunc)**2
+        x_rho /= x_rho.sum()
+        av_x = np.sum(x_rho*self.x)
+        av_x2 = np.sum(x_rho*self.x**2)
+
+        p_rho = np.abs(fftpack.fft(wavefunc))**2
+        p_rho /= p_rho.sum()
+        av_p = np.sum(p_rho*self.p)
+        av_p2 = np.sum(p_rho*self.p**2)
+
+        return av_x, np.sum(self.force*x_rho), av_p, np.sqrt((av_x2-av_x**2)*(av_p2-av_p**2))
+
+    def propagate(self, wavefunc):
+        #
+        ampl = wavefunc
+        mu = self.x
+        #
+        #if alpha is None:
+        # defying alpha based on mu
+        sigma = 3.5*(mu[1]-mu[0])
+        alpha = -0.5/sigma**2
+        #
+        #
+        #ampl = np.linalg.lstsq(
+        #    np.array([np.exp(alpha*(x-x0)**2) for x0 in x]).T,
+        #    wavefunc
+        #)[0]
+        ##############################
+        # propagation by expKE
+        ##############################
+        #
+        c = 1. - 2j*self.dt*alpha
         #
         ampl = ampl / np.sqrt(c)
         alpha = alpha / c
         #
-        return ampl, alpha, mu
-
-    def expU_Mapper(self, gaussian):
-        """
-        Calculate action of exp(-1j*dt*U(x)) on a gaussian
-        given in the coordinate representation
-        :param gaussian: (ampl, alpha, mu) tuple denoting ampl*exp(alpha*(x-mu)**2)
-        :return: gaussian-like tuples
-        """
-        return self.multiply(gaussian, self.expUexpansion)
-
-    def multiply(self, gaussian1, gaussian2):
+        ##############################
         #
-        ampl_1, alpha_1, mu_1 = gaussian1
-        #
-        ampl_1  = ampl_1[:, np.newaxis]
-        alpha_1 = alpha_1[:, np.newaxis]
-        mu_1    = mu_1[:, np.newaxis]
-        #
-        ampl_2, alpha_2, mu_2 = gaussian2
-        #
-        ampl_2  = ampl_2[np.newaxis,:]
-        alpha_2 = alpha_2[np.newaxis,:]
-        mu_2    = mu_2[np.newaxis,:]
-        #
-        alpha = alpha_1 + alpha_2
-        mu = (alpha_1*mu_1 + alpha_2*mu_2) / alpha
-        ampl = ampl_1*ampl_2 * np.exp(alpha_1 * mu_1**2 + alpha_2 * mu_2**2 - alpha * mu**2)
-        #
-        return np.ravel(ampl), np.ravel(alpha), np.ravel(mu)
-
-    def norms_Mapper(self, gaussian):
-        """
-        Calculate normalization integral
-            N = int(abs(ampl*exp(alpha*(x-mu)**2))**2 , x=-infinity..+infinity)
-        :param gaussian: (ampl, alpha, mu) tuple denoting ampl*exp(alpha*(x-mu)**2)
-        :return: N
-        """
-        ampl, alpha, mu = gaussian
-        #
-        a = -2.*alpha.real
-        b = -4*np.real(mu*alpha)
-        #
-        norms = np.abs(ampl)**2 * np.sqrt(np.pi/a) * np.exp(
-                0.25*b**2/a + 2*np.real(alpha*mu**2)
-        )
-        #
-        return norms
-
-    #############################################################
-    #
-    #   Propagator
-    #
-    #############################################################
-
-    @classmethod
-    def getwavefunc(cls, gaussian, x):
-        #
-        ampl, alpha, mu = gaussian
+        # Lines below are equivalent to
+        # ampl = sum(A*np.exp(alpha*(x-x0)**2) for A, x0 in izip(ampl, mu))
         #
         ampl = ampl[np.newaxis,:]
-        alpha = alpha[np.newaxis,:]
         mu = mu[np.newaxis,:]
+        x = self.x[:,np.newaxis]
+        ampl = (ampl*np.exp(alpha*(x-mu)**2)).sum(axis=1)
         #
-        x = x[:,np.newaxis]
+        ##############################
         #
-        return np.sum(
-            ampl*np.exp(alpha*(x - mu)**2),
-            axis=1
-        )
-
-    def propagate(self, wavefunc):
-        """
-        Propagate wave function by one time step using
-        the Trotter product
-        :return:
-        """
+        ampl *= self.expU
+        ampl /= np.linalg.norm(ampl)
         #
-        # propagate by kinetic part
-        wavefunc = self.expKE_Mapper(wavefunc)
-        #
-        # propagate by potential part
-        wavefunc = self.expU_Mapper(wavefunc)
-        #
-        # propagate by kinetic part
-        wavefunc = self.expKE_Mapper(wavefunc)
-        #
-        #norms = self.norms_Mapper(wavefunc)
-        #norms /= norms.sum()
-        #
-        # find out which gausian to delete
-        # indx = np.nonzero(norms < self.norm_cutoff)[0]
-        #
-        # wavefunc = [np.delete(param, indx) for param in wavefunc]
-        #
-        # print wavefunc[0].size
-        #
-        #
-        # resumpling
-        x = np.linspace(-5, +5, 100)
-
-        sigma = 0.5 * (x[1]-x[0])
-        alpha = -0.5/sigma**2
-
-        psi = self.getwavefunc(wavefunc, x)
-        psi /= np.linalg.norm(psi)
-
-        ampls = np.linalg.lstsq(
-            [np.exp(alpha*(x-x0)**2) for x0 in x],
-            psi
-        )[0]
-
-        wavefunc = (ampls, alpha*np.ones_like(x), x)
-        return wavefunc
-
-#################################################################
-#
-# Harmonic oscilator propagation
-#
-#################################################################
+        #self.alpha = alpha.real
+        return ampl
 
 # time increment
-dt = 0.025
+dt = 0.01
 
 # coordinate range
-x = np.linspace(-5, +5, 100)
+x = np.linspace(-5, +5, 512)
+
+alpha = 0.1
+beta = 0.2
 
 # potential
-U = 0.5 * x**4
-expU = np.exp(-1j*dt*U)
+def U(x):
+    return alpha*x**4 + beta*x**2
 
-# approximate expU by gaussians
-sigma = 0.5 * (x[1]-x[0])
-alpha = -0.5/sigma**2
+# force
+def force(x):
+    return -4*alpha*x**3 - 2*beta*x
 
-coeffs = np.linalg.lstsq(
-    [np.exp(alpha*(x-x0)**2) for x0 in x],
-    expU
-)[0]
-
-# Check the difference
-print "Accuracy of the approximation expU ", \
-np.linalg.norm(
-    expU -
-    sum(c*np.exp(alpha*(x-x0)**2) for c, x0 in izip(coeffs, x))
-)
-
-expUexpansion = (coeffs, alpha*np.ones_like(x), x)
-
-def ProbDensity(wave, x):
-    psi = sum(
-        c * np.exp(a*(x-mu)**2) for c, a, mu in izip(*wave)
-    )
-    return np.abs(psi)
+expU = np.exp(-1j*dt*U(x))
 
 
 class CHarmonicOscilator(AbsSchrodingerPropagator):
-    dt = 0.5*dt
+    dt = dt
     m = 1
-    expUexpansion = expUexpansion
-    norm_cutoff = 1e-7
+    x = x
+    p = 2*np.pi*fftpack.fftfreq(len(x), x[1]-x[0])
+    expU = expU #(np.array([1.0 + 0j]), np.array([-1j*dt]), np.array([0j]))
+    force = force(x)
 
 HarmonicOsc = CHarmonicOscilator()
 
-wavefunc = ( np.array([1. + 0j]), np.array([-1. + 0j]), np.array([0 + 0.5j]) )
+wavefunc = np.exp(-(x-3)**2) + 0j
+wavefunc /= np.linalg.norm(wavefunc)
 
-#plt.plot(x, np.abs(HarmonicOsc.getwavefunc(wavefunc, x))**2, label='initial condition')
+"""
+plt.plot(x, np.abs(wavefunc)**2, label='initial')
 
-density = []
-for i in range(200):
-    print i
+for i in xrange(100):
     wavefunc = HarmonicOsc.propagate(wavefunc)
-    density.append(
-        np.abs(HarmonicOsc.getwavefunc(wavefunc, x))**2
-    )
 
-#plt.plot(x, np.abs(HarmonicOsc.getwavefunc(wavefunc1, x))**2, label='final condition')
-#plt.legend()
-plt.imshow(density)
+plt.plot(x, np.abs(wavefunc)**2, label='final')
+plt.legend()
+"""
+
+averages = []
+evolution = []
+
+for i in xrange(2500):
+
+    averages.append(HarmonicOsc.averages(wavefunc, Nx=3, Np=1))
+    wavefunc = HarmonicOsc.propagate(wavefunc)
+
+    if i % 3 == 0:
+        #print i
+        evolution.append(
+            wavefunc
+        )
+
+plt.subplot(411)
+plt.imshow(np.abs(np.array(evolution).T)**2)
+
+plt.subplot(412)
+
+#av_x, av_x2, av_x3, av_p = [np.array(x) for x in zip(*averages)]
+av_x, av_force, av_p, uncertanty = [np.array(x) for x in zip(*averages)]
+
+
+dx_dt = np.gradient(av_x, dt)
+# Effective mass
+m = 1./np.linalg.lstsq(av_p[:,np.newaxis], dx_dt)[0]
+
+print "Effective mass ", m
+plt.plot(m*dx_dt)
+plt.plot(av_p)
+plt.title("First Ehrenfest theorem")
+
+plt.subplot(413)
+
+dp_dt = np.gradient(av_p, dt)
+# Effective friction and spring constants
+gamma, f = np.linalg.lstsq(np.array([av_p, av_force]).T, dp_dt)[0]
+
+print "Effective friction constant ", gamma
+print "Force factor ", f
+
+plt.plot(dp_dt, label='$d\\langle p \\rangle/dt$')
+plt.plot(gamma*av_p + f*av_force, label='$\\langle \\gamma p + f F(x) \\rangle$')
+#plt.plot(gamma*av_p + f*force(av_x), label='$\\gamma\\langle p\\rangle + f F(\\langle x\\rangle) $')
+plt.legend()
+
+plt.subplot(414)
+plt.plot(uncertanty)
+
 plt.show()
+
+
+
+
