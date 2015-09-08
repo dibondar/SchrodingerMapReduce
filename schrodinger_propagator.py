@@ -1,76 +1,104 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import fftpack
-from itertools import chain
 
-class AbsSchrodingerPropagator:
-    """
-    Parameters to be defined
+###############################################################
+class System:
 
-    self.dt -- time increment
-    self.m -- mass
-    self.x -- coordinate
-    self.expU
-    self.force
-    """
-    def averages(self, wavefunc, Nx=1, Np=1):
+    def U(self, x):
         """
-        #
-        averages = []
-        #
-        x_rho = np.abs(wavefunc)**2
-        x_pow = np.ones_like(self.x)
-        for n in xrange(Nx):
-            x_pow *= self.x
-            averages.append(np.sum(x_pow*x_rho))
-        #
-        p_wavefunc = fftpack.fft(wavefunc)
-        p_wavefunc /= np.linalg.norm(p_wavefunc)
-        p_rho = np.abs(p_wavefunc)**2
-        #
-        p_pow = np.ones_like(self.p)
-        for n in xrange(Np):
-            p_pow *= self.p
-            averages.append(np.sum(p_pow*p_rho))
-        #
-        return tuple(averages)
+        Potential
+        :param x:
+        :return:
         """
-        # dx = self.x[1] - self.x[0]
-        #
-        x_rho = np.abs(wavefunc)**2
+        return 0.5*(x)**2
+
+    def F(self, x):
+        """
+        Force
+        :param x:
+        :return:
+        """
+        return -x
+
+    def averages(self):
+        x_rho = np.abs(self.wavefunc)**2
         x_rho /= x_rho.sum()
-        av_x = np.sum(x_rho*self.x)
-        av_x2 = np.sum(x_rho*self.x**2)
+        av_x = np.dot(x_rho, self.x)
+        av_x2 = np.dot(x_rho, self.x**2)
 
-        p_rho = np.abs(fftpack.fft(wavefunc))**2
+        p_rho = np.abs(fftpack.fft(self.wavefunc))**2
         p_rho /= p_rho.sum()
-        av_p = np.sum(p_rho*self.p)
-        av_p2 = np.sum(p_rho*self.p**2)
+        av_p = np.dot(p_rho, self.p)
+        av_p2 = np.dot(p_rho, self.p**2)
 
-        return av_x, np.sum(self.force*x_rho), av_p, np.sqrt((av_x2-av_x**2)*(av_p2-av_p**2))
+        return av_x, np.dot(self.force, x_rho), av_p, np.sqrt((av_x2-av_x**2)*(av_p2-av_p**2))
 
-    def propagate(self, wavefunc):
+    def __init__(self, **kwargs):
+        """
+        Initialize system's parameters
+        :param N: number of points to be used
+        :param xmax: coordinate amplitude
+        :return:
+        """
+        # Set parameters
+        for k, v in kwargs.items():
+            setattr(self, k, v)
         #
-        ampl = wavefunc
-        mu = self.x
+        # Coordinate range
+        self.x = np.linspace(-self.xmax, self.xmax, self.N)
+        self.dx = self.x[1]-self.x[0]
         #
-        #if alpha is None:
-        # defying alpha based on mu
-        sigma = 3.5*(mu[1]-mu[0])
-        alpha = -0.5/sigma**2
+        # Momentum range
+        self.p = 2*np.pi*fftpack.fftfreq(self.x.size, self.dx)
         #
+        # Verify that the force indeed corresponds to the -derivative of potential
+        """
+        if not np.allclose(-np.gradient(self.U(self.x), self.dx), self.F(self.x), rtol=1e-1):
+            raise RuntimeError("Potential and Force are not compatible")
+        """
         #
-        #ampl = np.linalg.lstsq(
-        #    np.array([np.exp(alpha*(x-x0)**2) for x0 in x]).T,
-        #    wavefunc
-        #)[0]
-        ##############################
+        # Define auxiliary arrays for split-operator
+        self.expKE = np.exp(-0.5j*self.dt*self.p**2/self.m)
+        #
+        self.p_filter = np.exp(-2.*self.dt*0.5*self.p**2)
+        #
+        self.expU = np.exp(-1.j*self.dt*self.U(self.x))
+        #
+        self.force = self.F(self.x)
+
+###############################################################
+
+class SplitOperator(System):
+
+    def propagate(self):
+        """
+        Propagate
+        :param wavefunc:
+        :return:
+        """
+        self.wavefunc *= self.expU
+        self.wavefunc = fftpack.fft(self.wavefunc)
+        self.wavefunc *= self.expKE
+        self.wavefunc *= self.p_filter
+        self.wavefunc = fftpack.ifft(self.wavefunc, overwrite_x=True)
+        self.wavefunc /= np.linalg.norm(self.wavefunc)
+
+###############################################################
+
+class NewPropagator(System):
+    """
+    Define
+        self.sigma
+    """
+    def propagate(self):
+        #
+        alpha = -0.5/self.sigma**2
         # propagation by expKE
-        ##############################
         #
         c = 1. - 2j*self.dt*alpha
         #
-        ampl = ampl / np.sqrt(c)
+        self.wavefunc /= np.sqrt(c)
         alpha = alpha / c
         #
         ##############################
@@ -78,113 +106,112 @@ class AbsSchrodingerPropagator:
         # Lines below are equivalent to
         # ampl = sum(A*np.exp(alpha*(x-x0)**2) for A, x0 in izip(ampl, mu))
         #
-        ampl = ampl[np.newaxis,:]
-        mu = mu[np.newaxis,:]
-        x = self.x[:,np.newaxis]
-        ampl = (ampl*np.exp(alpha*(x-mu)**2)).sum(axis=1)
+        wavefunc = self.wavefunc[:,np.newaxis]
+        mu =self.x[:,np.newaxis]
+        x = self.x[np.newaxis,:]
+        self.wavefunc = (wavefunc*np.exp(alpha*(x-mu)**2)).sum(axis=0)
+        #
+        # K = np.ceil(3*np.sqrt(-0.5/alpha.real) / self.dx)
         #
         ##############################
         #
-        ampl *= self.expU
-        ampl /= np.linalg.norm(ampl)
-        #
-        #self.alpha = alpha.real
-        return ampl
+        self.wavefunc *= self.expU
+        self.wavefunc /= np.linalg.norm(self.wavefunc)
 
-# time increment
-dt = 0.01
+###############################################################
+#
+#   Initialize simulations
+#
+###############################################################
 
-# coordinate range
-x = np.linspace(-5, +5, 512)
+params = dict(dt=0.01, N=512, xmax=5, m=1, sigma=0.05) #sigma=0.03
 
-alpha = 0.1
-beta = 0.2
+SOp = SplitOperator(**params)
+# Initial condition
+SOp.wavefunc = np.exp(-(SOp.x+1)**2 + 4j*SOp.x) + 0j
+SOp.wavefunc /= np.linalg.norm(SOp.wavefunc)
 
-# potential
-def U(x):
-    return alpha*x**4 + beta*x**2
+New = NewPropagator(**params)
+# Initial condition
+New.wavefunc = np.exp(-(New.x+1)**2 + 4j*New.x) + 0j
+New.wavefunc /= np.linalg.norm(New.wavefunc)
 
-# force
-def force(x):
-    return -4*alpha*x**3 - 2*beta*x
+###############################################################
+#
+#   Propagate
+#
+###############################################################
 
-expU = np.exp(-1j*dt*U(x))
+SOp_evolution = []
+SOp_averages = []
 
+New_evolution = []
+New_averages = []
 
-class CHarmonicOscilator(AbsSchrodingerPropagator):
-    dt = dt
-    m = 1
-    x = x
-    p = 2*np.pi*fftpack.fftfreq(len(x), x[1]-x[0])
-    expU = expU #(np.array([1.0 + 0j]), np.array([-1j*dt]), np.array([0j]))
-    force = force(x)
+overlap = []
 
-HarmonicOsc = CHarmonicOscilator()
+for i in xrange(1000):
+    SOp.propagate()
+    SOp_averages.append(SOp.averages())
 
-wavefunc = np.exp(-(x-3)**2) + 0j
-wavefunc /= np.linalg.norm(wavefunc)
+    New.propagate()
+    New_averages.append(New.averages())
 
-"""
-plt.plot(x, np.abs(wavefunc)**2, label='initial')
-
-for i in xrange(100):
-    wavefunc = HarmonicOsc.propagate(wavefunc)
-
-plt.plot(x, np.abs(wavefunc)**2, label='final')
-plt.legend()
-"""
-
-averages = []
-evolution = []
-
-for i in xrange(2500):
-
-    averages.append(HarmonicOsc.averages(wavefunc, Nx=3, Np=1))
-    wavefunc = HarmonicOsc.propagate(wavefunc)
-
-    if i % 3 == 0:
+    if i % 10 == 0:
         #print i
-        evolution.append(
-            wavefunc
-        )
+        SOp_evolution.append(SOp.wavefunc)
+        New_evolution.append(New.wavefunc)
 
-plt.subplot(411)
-plt.imshow(np.abs(np.array(evolution).T)**2)
+New_evolution.pop()
 
-plt.subplot(412)
+###############################################################
+#
+#   Plot
+#
+###############################################################
 
-#av_x, av_x2, av_x3, av_p = [np.array(x) for x in zip(*averages)]
-av_x, av_force, av_p, uncertanty = [np.array(x) for x in zip(*averages)]
+def plot_Ehrenfest(propagator, averages):
+    dt = propagator.dt
+    # Unpack averages
+    av_x, av_force, av_p, uncertanty = [np.array(x) for x in zip(*averages)]
+    #
+    dx_dt = np.gradient(av_x, dt)
+    # Effective mass
+    m = 1./np.linalg.lstsq(av_p[:,np.newaxis], dx_dt)[0]
 
 
-dx_dt = np.gradient(av_x, dt)
-# Effective mass
-m = 1./np.linalg.lstsq(av_p[:,np.newaxis], dx_dt)[0]
+    print "Effective mass ", m
+    plt.subplot(211)
+    plt.plot(m*dx_dt)
+    plt.plot(av_p)
+    plt.title("First Ehrenfest theorem")
 
-print "Effective mass ", m
-plt.plot(m*dx_dt)
-plt.plot(av_p)
-plt.title("First Ehrenfest theorem")
+    dp_dt = np.gradient(av_p, dt)
+    # Effective friction and spring constants
+    gamma, f = np.linalg.lstsq(np.array([av_p, av_force]).T, dp_dt)[0]
 
-plt.subplot(413)
+    print "Effective friction constant ", gamma
+    print "Force factor ", f
 
-dp_dt = np.gradient(av_p, dt)
-# Effective friction and spring constants
-gamma, f = np.linalg.lstsq(np.array([av_p, av_force]).T, dp_dt)[0]
+    plt.subplot(212)
+    plt.plot(dp_dt, label='$d\\langle p \\rangle/dt$')
+    plt.plot(gamma*av_p + f*av_force, label='$\\langle \\gamma p + f F(x) \\rangle$')
+    #plt.plot(gamma*av_p + f*force(av_x), label='$\\gamma\\langle p\\rangle + f F(\\langle x\\rangle) $')
+    plt.legend(loc='upper right')
 
-print "Effective friction constant ", gamma
-print "Force factor ", f
 
-plt.plot(dp_dt, label='$d\\langle p \\rangle/dt$')
-plt.plot(gamma*av_p + f*av_force, label='$\\langle \\gamma p + f F(x) \\rangle$')
-#plt.plot(gamma*av_p + f*force(av_x), label='$\\gamma\\langle p\\rangle + f F(\\langle x\\rangle) $')
-plt.legend()
+plot_Ehrenfest(SOp, SOp_averages)
 
-plt.subplot(414)
-plt.plot(uncertanty)
+"""
+plt.subplot(211)
+plt.imshow(np.angle(np.array(SOp_evolution).T), origin='lower')
+plt.title('Split-operator evolution')
+
+plt.subplot(212)
+plt.imshow(np.abs(np.angle(New_evolution).T), origin='lower')
+plt.title('New evolution')
+"""
 
 plt.show()
-
-
 
 
