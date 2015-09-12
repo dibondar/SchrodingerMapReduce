@@ -11,7 +11,7 @@ class System:
         :param x:
         :return:
         """
-        return 0.5*(x)**2
+        return 0 # 0.5*(x)**2
 
     def F(self, x):
         """
@@ -124,16 +124,16 @@ class NewPropagator(System):
 #
 ###############################################################
 
-params = dict(dt=0.01, N=512, xmax=5, m=1, sigma=0.05) #sigma=0.03
+params = dict(dt=0.01, N=256, xmax=5, m=1, sigma=0.05) #sigma=0.03
 
 SOp = SplitOperator(**params)
 # Initial condition
-SOp.wavefunc = np.exp(-(SOp.x+1)**2 + 4j*SOp.x) + 0j
+SOp.wavefunc = np.exp(-(SOp.x+1)**2 + 1j*SOp.x) + 0j
 SOp.wavefunc /= np.linalg.norm(SOp.wavefunc)
 
 New = NewPropagator(**params)
 # Initial condition
-New.wavefunc = np.exp(-(New.x+1)**2 + 4j*New.x) + 0j
+New.wavefunc = np.exp(-(New.x+1)**2 + 1j*New.x) + 0j
 New.wavefunc /= np.linalg.norm(New.wavefunc)
 
 ###############################################################
@@ -157,7 +157,7 @@ for i in xrange(1000):
     New.propagate()
     New_averages.append(New.averages())
 
-    if i % 10 == 0:
+    if i % 1 == 0:
         #print i
         SOp_evolution.append(SOp.wavefunc)
         New_evolution.append(New.wavefunc)
@@ -200,17 +200,15 @@ def plot_Ehrenfest(propagator, averages):
     plt.legend(loc='upper right')
 
 
-plot_Ehrenfest(SOp, SOp_averages)
+#plot_Ehrenfest(SOp, SOp_averages)
 
-"""
 plt.subplot(211)
-plt.imshow(np.angle(np.array(SOp_evolution).T), origin='lower')
+plt.imshow(np.abs(np.array(SOp_evolution).T), origin='lower')
 plt.title('Split-operator evolution')
 
 plt.subplot(212)
-plt.imshow(np.abs(np.angle(New_evolution).T), origin='lower')
+plt.imshow(np.abs(np.array(New_evolution).T), origin='lower')
 plt.title('New evolution')
-"""
 
 plt.show()
 
