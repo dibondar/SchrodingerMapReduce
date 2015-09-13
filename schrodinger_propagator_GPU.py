@@ -1,7 +1,13 @@
-import pycuda.driver as cuda
 import pycuda.gpuarray as gpuarray
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
+
+import skcuda.linalg
+try:
+    skcuda.linalg.init()
+except ImportError:
+    pass
+
 import matplotlib.pyplot as plt
 from scipy import fftpack
 
@@ -12,8 +18,8 @@ class System:
     #
     # Rules of converting python types to CUDA types
     python2CUDA = {
-        float : "__constant__ float %s = %f;\n",
-        int : "__constant__ int %s  = %d;\n"
+        float : "const float %s = %f;\n",
+        int : "const int %s  = %d;\n"
     }
     #
     # CUDA code
@@ -25,12 +31,12 @@ class System:
 
         typedef pycuda::complex<float> cuda_complex;
 
-        // Constants
-        {CUDA_constants}
-
         __global__ void unormalize_propagate(cuda_complex *wavefunc_in, cuda_complex *wavefunc_out)
         {{
             const int indexTotal = threadIdx.x + blockDim.x*blockIdx.x;
+
+            ////////////////////////////// Constants //////////////////////////////
+            {CUDA_constants}
 
             // Grid step size
             const float dx = 2.*xmax / float(N);
@@ -44,17 +50,27 @@ class System:
             // width of the Gaussian after propagation
             const cuda_complex alpha_out = cuda_complex(alpha_in, 0.) / c;
 
-            // const float x = -xmax +  indexTotal *2.*xmax/float(N-1.);
+            // How many gaussians to add
+            const int K = ceil( S*sqrt(abs(0.5/real(alpha_out))) / dx );
+
+            // Curret coordinate
+            const float x = -xmax +  indexTotal *2.*xmax/float(N-1.);
+            ///////////////////////////////////////////////////////////////////////
 
             cuda_complex result = wavefunc_in[indexTotal];
 
+            // propagation by np.exp(-0.5j*self.dt*self.p**2/self.m)
             for (int k = 1; k <=  min(indexTotal, K); k++)
                 result += wavefunc_in[indexTotal-k]* exp(alpha_out*dx*dx*float(k*k));
 
             for (int k = 1; k <=  min(N-indexTotal-1, K); k++)
                 result += wavefunc_in[indexTotal+k] * exp(alpha_out*dx*dx*float(k*k));
 
-            wavefunc_out[indexTotal] = result / sqrt(c);
+            // propagation by np.exp(-1.j*self.dt*self.potentialString)
+            result *= exp(cuda_complex(0, -dt*({potentialString})));
+
+            // Return the result
+            wavefunc_out[indexTotal] = result;
         }}
     """
     #
@@ -101,20 +117,25 @@ class System:
         #
         # Compile code
         self.unormalize_propagate = SourceModule(self.CUDA_propagator).get_function("unormalize_propagate")
+        #
+        #
+        alpha = -0.5/self.sigma**2
+        # propagation by expKE
+        #
+        c = 1. - 2j*self.dt*alpha
+        #
+        alpha = alpha / c
+        print self.S*np.ceil(np.sqrt(-0.5/alpha.real) / self.dx)
+
 
     def cuda_propagate(self, wavefunc_in, wavefunc_out):
         #
         # Propagate without normalization
-        self.unormalize_propagate(wavefunc_in, wavefunc_out, block=(1,1,1), grid=(self.N,1))
+        self.unormalize_propagate(wavefunc_in, wavefunc_out, block=(256,1,1), grid=(self.N/256,1))
         #
         # normalize output
-        wavefunc_out /= np.sqrt(gpuarray.dot(wavefunc_out, wavefunc_out).get())
-
-
-###############################################################
-
-class NewPropagator(System):
-    pass
+        # wavefunc_out /= np.sqrt(gpuarray.dot(wavefunc_out.conj(), wavefunc_out).get())
+        wavefunc_out /= skcuda.linalg.norm(wavefunc_out)
 
 ###############################################################
 #
@@ -122,25 +143,42 @@ class NewPropagator(System):
 #
 ###############################################################
 
-params = dict(dt=0.01, N=1024, xmax=10, m=1, sigma=0.05, K=20) #sigma=0.03
+params = dict(dt=0.01, N=1024, xmax=10, m=1, sigma=0.03, S=10, potentialString='x*x') #sigma=0.03
 
-New = NewPropagator(**params)
+New = System(**params)
 x = New.x
 
-wavefunc_in = np.exp(-1*x**2) + 0j
+# Initial condition
+wavefunc_in = np.exp(-1*(x-3)**2) + 0j
 wavefunc_in /= np.linalg.norm(wavefunc_in)
 wavefunc_in = gpuarray.to_gpu(np.ascontiguousarray(wavefunc_in , dtype=np.complex64))
 wavefunc_out = gpuarray.zeros_like(wavefunc_in)
 
-plt.plot(x, np.abs(wavefunc_in.get()), label='initial')
+###############################################################
+#
+#   Propagate
+#
+###############################################################
 
-for t in xrange(50):
+SOp_evolution = []
+
+New_evolution = []
+
+for i in xrange(10000):
     New.cuda_propagate(wavefunc_in, wavefunc_out)
     wavefunc_in, wavefunc_out = wavefunc_out, wavefunc_in
+    if i % 10 == 0:
+        New_evolution.append(abs(wavefunc_in).get())
 
-plt.plot(x, np.abs(wavefunc_in.get()), label='out')
-plt.legend()
+###############################################################
+#
+#   Plot
+#
+###############################################################
+
+plt.imshow(np.array(New_evolution).T, origin='lower')
 plt.show()
+
 
 
 
